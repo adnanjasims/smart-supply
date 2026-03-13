@@ -17,27 +17,62 @@ This project uses the real-world Walmart M5 Forecasting dataset to simulate real
 ## Setup
 
 1. Clone the repository:
+
+```bash
 git clone https://github.com/adnanjasims/smart-supply.git
 cd smart-supply
+```
 
 2. Create and activate a virtual environment:
-python3 -m venv venv
-source venv/bin/activate
 
-3. Install dependencies:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+3. Install dependencies (if you are not using `requirements.txt`):
+
+```bash
+python3 -m pip install --upgrade pip
+python3 -m pip install pandas numpy lightgbm matplotlib seaborn scikit-learn joblib streamlit
+```
+
+If you prefer, you can instead install from a `requirements.txt` file:
+
+```bash
 pip install -r requirements.txt
+```
 
 4. Download the M5 Dataset:
-Download sales_train_validation.csv, calendar.csv, and sell_prices.csv from the Kaggle M5 Forecasting Competition and place them in your project root directory.
 
-## Usage
+Download `sales_train_validation.csv`, `calendar.csv`, and `sell_prices.csv` from the Kaggle M5 Forecasting Competition and place them in your project root directory.
+
+## Usage (Core Pipeline)
 
 Run the main pipeline to process data, train the model, and simulate profits:
 
+```bash
 python3 grocery.py
+```
 
 ## Output
 
 The script generates two key files:
-- smart_supply_dashboard.png: Visualizes net profit comparisons, waste reduction, prediction errors, and daily profit trajectories.
-- m5_supply_chain_forecast.csv: A detailed report containing daily predicted demand, automated stock decisions, simulated waste, and net profit per item.
+- `smart_supply_dashboard.png`: Visualizes net profit comparisons, waste reduction, prediction errors, and daily profit trajectories.
+- `m5_supply_chain_forecast.csv`: A detailed report containing daily predicted demand, automated stock decisions, simulated waste, and net profit per item.
+
+## Web Frontend (Streamlit Dashboard)
+
+After you have run `python3 grocery.py` at least once and `m5_supply_chain_forecast.csv` has been generated, you can launch the interactive browser dashboard:
+
+```bash
+python3 -m streamlit run app.py
+```
+
+The Streamlit app will:
+- read `m5_supply_chain_forecast.csv` and compare AI-driven strategy vs a simple human baseline,
+- show key KPIs (human profit, AI/ML model profit, profit lift),
+- plot daily profit trajectories for both strategies, and
+- expose an item-level table of recommendations with filters and a legend explaining each column.
+
+Open the URL printed by Streamlit (usually `http://localhost:8501`) in your browser to explore the results.

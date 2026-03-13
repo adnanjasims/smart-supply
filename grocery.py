@@ -6,6 +6,7 @@ import seaborn as sns
 from sklearn.metrics import mean_absolute_error
 import warnings
 import time
+import joblib
 
 warnings.filterwarnings('ignore')
 plt.style.use('ggplot')
@@ -53,13 +54,15 @@ class SmartSupplyAI:
         print("[2/6] Engineering time-series features...")
         df = self.df.sort_values(['id', 'date']).copy()
 
-        # lag features (what did sales look like 7 and 28 days ago?)
+        # lag features (what did sales look like 7, 14 and 28 days ago?)
         df['sales_lag_7'] = df.groupby('id')['sales'].shift(7)
+        df['sales_lag_14'] = df.groupby('id')['sales'].shift(14)
         df['sales_lag_28'] = df.groupby('id')['sales'].shift(28)
 
-        # rolling statistics for trend detection
+        # rolling statistics for trend detection (short and medium windows)
         df['rolling_mean_7'] = df.groupby('id')['sales'].transform(lambda x: x.shift(1).rolling(7).mean())
         df['rolling_std_7'] = df.groupby('id')['sales'].transform(lambda x: x.shift(1).rolling(7).std())
+        df['rolling_mean_28'] = df.groupby('id')['sales'].transform(lambda x: x.shift(1).rolling(28).mean())
 
         # price momentum and discount tracking
         df['price_max'] = df.groupby('item_id')['sell_price'].transform('max')
@@ -68,6 +71,13 @@ class SmartSupplyAI:
         # date specific features
         df['day_of_week'] = df['date'].dt.dayofweek
         df['is_weekend'] = df['day_of_week'].ge(5).astype(int)
+        df['day_of_month'] = df['date'].dt.day
+        df['week_of_year'] = df['date'].dt.isocalendar().week.astype(int)
+        df['month'] = df['date'].dt.month
+
+        # categorical id features to help the model learn per-item and per-store patterns
+        for col in ['item_id', 'dept_id', 'cat_id', 'store_id']:
+            df[col] = df[col].astype('category')
 
         # drop rows with nan values caused by the lag shifting
         self.df = df.dropna()
@@ -80,19 +90,29 @@ class SmartSupplyAI:
         train = self.df[self.df['date'] <= cutoff]
         val = self.df[self.df['date'] > cutoff]
 
-        self.features = ['sales_lag_7', 'sales_lag_28', 'rolling_mean_7', 'rolling_std_7', 
-                         'sell_price', 'price_discount', 'day_of_week', 'is_weekend', 'snap_CA']
+        self.features = [
+            'sales_lag_7', 'sales_lag_14', 'sales_lag_28',
+            'rolling_mean_7', 'rolling_mean_28', 'rolling_std_7',
+            'sell_price', 'price_discount',
+            'day_of_week', 'is_weekend', 'day_of_month', 'week_of_year', 'month',
+            'snap_CA'
+        ]
 
         train_set = lgb.Dataset(train[self.features], train['sales'])
         val_set = lgb.Dataset(val[self.features], val['sales'])
 
-        # configure LightGBM parameters for poisson regression (best for item counts)
+        # configure lightgbm parameters for poisson regression (good for count data)
         params = {
             'objective': 'poisson',
             'metric': 'rmse',
-            'learning_rate': 0.07,
+            'learning_rate': 0.05,
             'subsample': 0.8,
+            'feature_fraction': 0.9,
+            'num_leaves': 64,
+            'min_data_in_leaf': 50,
             'force_col_wise': True,
+            'bagging_freq': 1,
+            'seed': 42,
             'verbose': -1
         }
 
@@ -106,6 +126,12 @@ class SmartSupplyAI:
         )
 
         self.val_df = val
+        # quick validation metric so you can see model quality
+        val_pred = self.model.predict(val[self.features])
+        mae = mean_absolute_error(val['sales'], val_pred)
+        print(f"   validation mae: {mae:.3f}")
+        # save the trained model to a file for the django backend to use
+        joblib.dump(self.model, 'lightgbm_model.pkl')
 
     def run_simulation(self):
         print("[4/6] Simulating real-world profit logic...")
@@ -121,8 +147,9 @@ class SmartSupplyAI:
         # dynamic safety stock calculation based on profit margins
         val_df['safety_factor'] = np.where(val_df['margin'] > 2.0, 1.25, 1.05)
         
-        # FIX 1: Use normal rounding, not ceil. This stops ordering 1 unit for items with 0.1 demand.
-        val_df['stock_decision'] = np.round(val_df['pred_demand'] * val_df['safety_factor'])
+        # use normal rounding and clip to avoid negative or extreme orders
+        raw_stock = np.round(val_df['pred_demand'] * val_df['safety_factor'])
+        val_df['stock_decision'] = np.clip(raw_stock, 0, None)
 
         # financial outcomes for the model
         val_df['units_sold'] = np.minimum(val_df['stock_decision'], val_df['sales'])
@@ -168,7 +195,7 @@ class SmartSupplyAI:
         # 1. profit comparison
         ax1 = fig.add_subplot(gs[0, 0])
         profits = [sim['sma_profit'].sum(), sim['net_profit'].sum(), sim['oracle_profit'].sum()]
-        labels = ['Human Strategy\n(Moving Avg)', 'AI Strategy\n(LightGBM)', 'Theoretical Max\n(Perfect)']
+        labels = ['Human Strategy\n(Moving Avg)', 'ML Strategy\n(LightGBM)', 'Theoretical Max\n(Perfect)']
         colors = ['#7f8c8d', '#2980b9', '#27ae60']
         bars = ax1.bar(labels, profits, color=colors)
         ax1.set_title("Net Profit Comparison (60-Day Test)")
@@ -178,7 +205,7 @@ class SmartSupplyAI:
         # 2. waste comparison
         ax2 = fig.add_subplot(gs[0, 1])
         waste = [sim['sma_waste_cost'].sum(), sim['waste_cost'].sum()]
-        ax2.bar(['Human Strategy', 'AI Strategy'], waste, color=['#c0392b', '#2980b9'])
+        ax2.bar(['Human Strategy', 'ML Strategy'], waste, color=['#c0392b', '#2980b9'])
         ax2.set_title("Total Waste Cost Comparison")
         ax2.set_ylabel("Capital Lost to Spoilage ($)")
 
@@ -193,7 +220,7 @@ class SmartSupplyAI:
         # 4. daily profit tracking
         ax4 = fig.add_subplot(gs[1, 1])
         daily_profit = sim.groupby('date')[['net_profit', 'sma_profit']].sum().reset_index()
-        sns.lineplot(data=daily_profit, x='date', y='net_profit', label='AI Profit', ax=ax4, color='#2980b9')
+        sns.lineplot(data=daily_profit, x='date', y='net_profit', label='ML Model Profit', ax=ax4, color='#2980b9')
         sns.lineplot(data=daily_profit, x='date', y='sma_profit', label='Human Profit', ax=ax4, color='#7f8c8d')
         ax4.set_title("Daily Profit Trajectory")
         ax4.set_xlabel("Date")
@@ -229,18 +256,18 @@ if __name__ == "__main__":
     app.run_simulation()
     
     sim = app.simulation
-    ai_profit = sim['net_profit'].sum()
+    ml_profit = sim['net_profit'].sum()
     human_profit = sim['sma_profit'].sum()
     oracle_profit = sim['oracle_profit'].sum()
     waste_savings = sim['sma_waste_cost'].sum() - sim['waste_cost'].sum()
     
     print("\nPROJECTED IMPACT REPORT (60-DAY VALIDATION)")
     print("-" * 45)
-    print(f"Human Baseline Profit:  ${human_profit:,.2f}")
-    print(f"AI Optimized Profit:    ${ai_profit:,.2f}")
-    print(f"Net Profit Increase:    ${ai_profit - human_profit:,.2f}")
-    print(f"Waste Capital Saved:    ${waste_savings:,.2f}")
-    print(f"Theoretical Max Profit: ${oracle_profit:,.2f}")
+    print(f"Human Baseline Profit:    ${human_profit:,.2f}")
+    print(f"ML Model Optimized Profit: ${ml_profit:,.2f}")
+    print(f"Net Profit Increase:      ${ml_profit - human_profit:,.2f}")
+    print(f"Waste Capital Saved:      ${waste_savings:,.2f}")
+    print(f"Theoretical Max Profit:   ${oracle_profit:,.2f}")
     print("-" * 45)
     
     app.generate_dashboard()
