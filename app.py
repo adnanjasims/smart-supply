@@ -17,7 +17,14 @@ def load_model():
     except FileNotFoundError:
         return None
 
-st.title("smartsupply – ml-optimized grocery ordering")
+@st.cache_resource
+def load_bundle():
+    try:
+        return joblib.load("lightgbm_bundle.pkl")
+    except FileNotFoundError:
+        return None
+
+st.title("smartsupply - ml-optimized grocery ordering")
 
 st.markdown(
     "this dashboard compares a tuned lightgbm model against a realistic human baseline "
@@ -38,10 +45,10 @@ with st.expander("about the walmart m5 data", expanded=False):
         st.image(
             "smart_supply_dashboard.png",
             caption="offline dashboard generated from the same m5 simulation.",
-            use_column_width=True,
+            use_container_width=True,
         )
     except Exception:
-        pass
+        st.caption("run `python3 grocery.py` to generate smart_supply_dashboard.png.")
 
 if "sim" not in st.session_state:
     try:
@@ -58,10 +65,12 @@ human_profit = sim["sma_profit"].sum()
 profit_lift = ml_profit - human_profit
 oracle_profit = sim["oracle_profit"].sum()
 
-total_item_days = len(sim)
 ml_stockout_rate = (sim["missed_sales"] > 0).mean() * 100
 ml_waste_total = sim["waste_cost"].sum()
-human_waste_total = sim.get("human_waste_cost", sim["waste_cost"]).sum() if "human_waste_cost" in sim.columns else 0
+if "human_waste_cost" in sim.columns:
+    human_waste_total = sim["human_waste_cost"].sum()
+else:
+    human_waste_total = None
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("human profit (60d)", f"${human_profit:,.0f}")
@@ -69,9 +78,19 @@ c2.metric("ml model profit (60d)", f"${ml_profit:,.0f}")
 c3.metric("profit lift", f"${profit_lift:,.0f}")
 c4.metric("ml stockout rate", f"{ml_stockout_rate:.1f}%")
 
+c5, c6, c7, c8 = st.columns(4)
+c5.metric("ml waste cost", f"${ml_waste_total:,.0f}")
+if human_waste_total is not None:
+    c6.metric("human waste cost", f"${human_waste_total:,.0f}")
+    c7.metric("waste saved", f"${human_waste_total - ml_waste_total:,.0f}")
+else:
+    c6.metric("human waste cost", "n/a")
+    c7.metric("waste saved", "n/a")
+c8.metric("oracle profit", f"${oracle_profit:,.0f}")
+
 st.markdown("---")
 
-# daily profit chart with prediction interval
+# daily profit chart
 st.subheader("daily profit trajectory")
 daily = sim.groupby("date").agg(
     ml_profit=("net_profit", "sum"),
@@ -124,13 +143,20 @@ st.markdown("---")
 
 # feature importance
 st.subheader("feature importance (lightgbm gain)")
-model = load_model()
+bundle = load_bundle()
+model = bundle["point"] if bundle is not None else load_model()
 if model is not None:
     importance = model.feature_importance(importance_type="gain")
     feat_names = model.feature_name()
     feat_df = pd.DataFrame({"feature": feat_names, "gain": importance})
     feat_df = feat_df.nlargest(15, "gain").sort_values("gain")
     st.bar_chart(feat_df.set_index("feature")["gain"])
+    if bundle is not None and bundle.get("cv_scores"):
+        scores = bundle["cv_scores"]
+        st.caption(
+            f"date-based cv mae: {float(np.mean(scores)):.3f} +/- {float(np.std(scores)):.3f} "
+            f"across {len(scores)} folds"
+        )
 else:
     st.info("model file not found. run `python3 grocery.py` to generate lightgbm_model.pkl.")
 
@@ -145,7 +171,11 @@ date_range = st.date_input(
     value=(daily.index.min().date(), daily.index.max().date()),
 )
 
-start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+else:
+    start_date = end_date = pd.to_datetime(date_range)
+
 filtered = sim[(sim["date"] >= start_date) & (sim["date"] <= end_date)]
 
 if item_filter:
@@ -171,8 +201,8 @@ st.markdown(
 **table legend**
 - `sales`: actual units sold that date.
 - `pred_demand`: lightgbm point forecast.
-- `pred_q75` / `pred_q90`: upper quantile forecasts (75th and 90th percentile). used for confidence-based safety stock.
-- `stock_decision`: units ordered — set to the q90 upper bound so the model orders more when uncertain.
+- `pred_q75` / `pred_q90`: upper quantile forecasts (75th and 90th percentile). used for dept-aware safety stock.
+- `stock_decision`: units ordered. perishables (FOODS_1) use q75 to cut waste; other depts use q90.
 - `waste`: units spoiled (dept-specific daily spoilage rate applied to unsold inventory).
 - `missed_sales`: units of demand that could not be fulfilled (stockouts).
 - `net_profit`: ml strategy profit after revenue, cogs, waste, and stockout penalty.

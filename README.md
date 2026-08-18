@@ -1,78 +1,124 @@
 # Smart Supply
 
-An AI-driven inventory optimization engine designed to minimize perishable food waste and maximize net profit using time-series demand forecasting and machine learning. 
+Grocery inventory optimization on real Walmart M5 data. The aim is to forecast daily demand with LightGBM, decide how much to stock, then score that decision on profit after spoilage and stockouts.
 
-This project uses the real-world Walmart M5 Forecasting dataset to simulate realistic retail environments, balancing the cost of stockouts against the cost of inventory spoilage.
+The model has to beat a realistic human baseline on money
 
-## Features
+## What it does
 
-- **Advanced Time-Series Forecasting:** Uses LightGBM (with a Poisson objective) to predict daily product demand based on historical sales data.
-- **Feature Engineering:** Implements lag features, rolling statistics (7-day moving averages), and price momentum indicators to capture market trends and seasonality.
-- **Dynamic Safety Stock:** Automatically adjusts buffer stock levels based on product profit margins (higher margin = higher safety factor).
-- **Realistic Business Simulation:** Calculates true net profit by incorporating a realistic 10% daily spoilage rate and probability-based ordering to prevent overstocking slow-moving items.
-- **Strategic Baselines:** Compares AI performance against a Human Strategy (7-day moving average) and an Oracle Baseline (theoretical maximum profit with perfect prediction).
-- **Comprehensive Analytics:** Generates a 4-panel analytical dashboard visualizing profit trajectories, capital lost to waste, and prediction error distributions.
-- **Data Export:** Outputs full daily forecast decisions and financial metrics to a CSV file.
+- Trains a LightGBM demand model (Poisson objective) on one store + FOODS category from M5
+- Builds lag, rolling, price, SNAP, holiday/event, and Fourier seasonality features
+- Tunes hyperparameters with Optuna when it is installed
+- Trains q75 / q90 quantile models for uncertainty
+- Uses dept-aware safety stock: perishables (FOODS_1) order closer to q75 to cut waste; other depts use q90
+- Compares ML ordering vs an EWMA + seasonal-naive human strategy and a perfect-foresight oracle
+- Writes a CSV of daily decisions plus a 6-panel dashboard image
+- Serves results in a Streamlit app
+- MLOps: YAML config, run tracking, data hashes, quality gates, and a local model registry
+
+Spoilage and COGS are set by department (produce vs dairy vs packaged)
 
 ## Setup
-
-1. Clone the repository:
 
 ```bash
 git clone https://github.com/adnanjasims/smart-supply.git
 cd smart-supply
-```
 
-2. Create and activate a virtual environment:
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
 
-3. Install dependencies (if you are not using `requirements.txt`):
-
-```bash
 python3 -m pip install --upgrade pip
-python3 -m pip install pandas numpy lightgbm matplotlib seaborn scikit-learn joblib streamlit
-```
-
-If you prefer, you can instead install from a `requirements.txt` file:
-
-```bash
 pip install -r requirements.txt
 ```
 
-4. Download the M5 Dataset:
+Grab these from the [Kaggle M5 Forecasting competition](https://www.kaggle.com/competitions/m5-forecasting-accuracy/data) and drop them in the project root:
 
-Download `sales_train_validation.csv`, `calendar.csv`, and `sell_prices.csv` from the Kaggle M5 Forecasting Competition and place them in your project root directory.
+- `sales_train_validation.csv`
+- `calendar.csv`
+- `sell_prices.csv`
 
-## Usage (Core Pipeline)
 
-Run the main pipeline to process data, train the model, and simulate profits:
+
+## Run the pipeline
 
 ```bash
 python3 grocery.py
 ```
 
-## Output
+Useful flags if you want to change the scope:
 
-The script generates two key files:
-- `smart_supply_dashboard.png`: Visualizes net profit comparisons, waste reduction, prediction errors, and daily profit trajectories.
-- `m5_supply_chain_forecast.csv`: A detailed report containing daily predicted demand, automated stock decisions, simulated waste, and net profit per item.
+```bash
+python3 grocery.py --store CA_1 --cat FOODS --lookback-days 365 --holdout-days 60
+```
 
-## Web Frontend (Streamlit Dashboard)
+If a required file is missing or a column is wrong, the script exits with a clear error instead of failing halfway through a melt.
 
-After you have run `python3 grocery.py` at least once and `m5_supply_chain_forecast.csv` has been generated, you can launch the interactive browser dashboard:
+## Outputs
+
+- `lightgbm_model.pkl` - point forecast model
+- `lightgbm_model_q75.pkl` / `lightgbm_model_q90.pkl` - quantile models
+- `lightgbm_bundle.pkl` - all three models plus feature list and CV scores
+- `smart_supply_dashboard.png` - profit, waste, stockouts, error hist, daily P&L, feature importance
+- `m5_supply_chain_forecast.csv` - per item/day forecasts, stock decisions, and both ML and human financials
+
+
+
+## Streamlit dashboard
+
+After at least one successful `grocery.py` run:
 
 ```bash
 python3 -m streamlit run app.py
 ```
 
-The Streamlit app will:
-- read `m5_supply_chain_forecast.csv` and compare AI-driven strategy vs a simple human baseline,
-- show key KPIs (human profit, AI/ML model profit, profit lift),
-- plot daily profit trajectories for both strategies, and
-- expose an item-level table of recommendations with filters and a legend explaining each column.
+Open the URL Streamlit prints (usually `http://localhost:8501`). You get KPIs, daily profit and demand charts, a per-dept breakdown, feature importance, and a filterable item table.
 
-Open the URL printed by Streamlit (usually `http://localhost:8501`) in your browser to explore the results.
+## How the money math works
+
+For each item-day:
+
+1. Predict demand (point + quantiles)
+2. Choose a stock level (dept-aware quantile rule above)
+3. Sell `min(stock, actual demand)`
+4. Unsold units spoil at the dept rate and eat COGS
+5. Missed demand pays a stockout penalty as a fraction of margin
+
+Human baseline uses `0.6 * EWMA(7) + 0.4 * seasonal_naive`, then a 1.1x buffer. Uses same cost model so comparison is fair.
+
+## Notes
+
+- Cross-validation is an expanding window by calendar date, not a row-index `TimeSeriesSplit`. That matters on panel data where many SKUs share the same day.
+- The first ~28 days per item are dropped on purpose after feature engineering. Those rows cannot fill a 28-day lag / rolling window yet. On CA_1 FOODS that is about 40k rows of warmup, plus a tiny slice of weeks with no sell_price in M5. It is not silent data loss.
+- If model prediction blows up at simulate time, the run falls back to the human EWMA rule and flags it in the report.
+- Optuna is optional. Without it (or with `--skip-tuning`), training still runs with solid default LightGBM params.
+
+
+
+## MLOps
+
+Tracked training lives under `artifacts/`. Config is `config/default.yaml`.
+
+```bash
+#train with tracking + quality gates
+python -m mlops train
+
+#same, then promote to production if gates pass
+python -m mlops train --promote
+
+#inspect runs
+python -m mlops list
+python -m mlops show <run_id>
+python -m mlops current
+python -m mlops promote <run_id>
+```
+
+Each run stores params, metrics, data file hashes, model bundle, forecast CSV, and dashboard under `artifacts/runs/<run_id>/`. Gates in the config can reject a run (e.g. MAE too high or fallback used). `promote` copies a good run into `artifacts/registry/production/`.
+
+## Tests
+
+```bash
+pip install -r requirements.txt
+python3 -m pytest -q
+```
+
+Tests build a tiny synthetic M5-shaped dataset, so they do not need the full Kaggle download.
