@@ -13,7 +13,7 @@ The model has to beat a realistic human baseline on money
 - Uses dept-aware safety stock: perishables (FOODS_1) order closer to q75 to cut waste; other depts use q90
 - Compares ML ordering vs an EWMA + seasonal-naive human strategy and a perfect-foresight oracle
 - Writes a CSV of daily decisions plus a 6-panel dashboard image
-- Serves results in a Streamlit app
+- Serves a FastAPI + React app (optional Gemini chat over the holdout CSV); Streamlit `app.py` still works
 - MLOps: YAML config, run tracking, data hashes, quality gates, and a local model registry
 
 Spoilage and COGS are set by department (produce vs dairy vs packaged)
@@ -53,6 +53,12 @@ python3 grocery.py --store CA_1 --cat FOODS --lookback-days 365 --holdout-days 6
 
 If a required file is missing or a column is wrong, the script exits with a clear error instead of failing halfway through a melt.
 
+Stocking uses a per-dept newsvendor critical fractile over the point / q75 / q90 ladder (perishables sit lower; shelf-stable sits higher). To re-score an existing holdout CSV after changing that rule, without retraining:
+
+```bash
+python3 resim_stock.py
+```
+
 ## Outputs
 
 - `lightgbm_model.pkl` - point forecast model
@@ -63,15 +69,37 @@ If a required file is missing or a column is wrong, the script exits with a clea
 
 
 
-## Streamlit dashboard
+## Web app (FastAPI + React)
 
 After at least one successful `grocery.py` run:
 
 ```bash
-python3 -m streamlit run app.py
+# terminal 1: API
+pip install -r requirements.txt
+uvicorn server.main:app --reload --port 8000
+
+# terminal 2: UI
+cd web
+npm install
+npm run dev
 ```
 
-Open the URL Streamlit prints (usually `http://localhost:8501`). You get KPIs, daily profit and demand charts, a per-dept breakdown, feature importance, and a filterable item table.
+Open `http://localhost:5173`. Vite proxies `/api` to the FastAPI process. You get KPIs, profit/demand charts, dept breakdown, feature importance, item filters, and an **Ask the data** chat panel.
+
+```bash
+cp .env.example .env
+# paste a key from https://aistudio.google.com/apikey into GEMINI_API_KEY
+```
+
+If no key is inputted, chat stays off but the rest of the app still works.
+
+### Streamlit (optional)
+
+The older dashboard is still there if needed:
+
+```bash
+python3 -m streamlit run app.py
+```
 
 ## How the money math works
 

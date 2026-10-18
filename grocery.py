@@ -42,6 +42,22 @@ REQUIRED_CAL_COLS = {'date', 'wm_yr_wk', 'd', 'snap_CA'}
 REQUIRED_PRICE_COLS = {'store_id', 'item_id', 'wm_yr_wk', 'sell_price'}
 
 
+def critical_fractile(dept_id: str) -> float:
+    """Newsvendor critical ratio for a dept: cu / (cu + co).
+
+    Underage cu = margin * stockout penalty. Overage co = spoilage_rate * COGS share.
+    Higher ratio => stock closer to the upper quantile.
+    """
+    cogs = DEPT_COGS_RATIO.get(str(dept_id), 0.60)
+    spoil = DEPT_SPOILAGE_RATE.get(str(dept_id), 0.10)
+    margin = 1.0 - cogs
+    cu = margin * STOCKOUT_PENALTY_FRACTION
+    co = spoil * cogs
+    if cu + co <= 0:
+        return 0.75
+    return float(cu / (cu + co))
+
+
 def _lgb_callbacks(stopping_rounds):
     """Quiet early-stopping callbacks (avoids noisy per-round console spam)."""
     return [
@@ -448,20 +464,61 @@ class SmartSupplyAI:
         print(f"   saved models under {self.output_dir.resolve()}")
 
     def _human_stock(self, df):
-        human_demand = 0.6 * df['ewma_7'] + 0.4 * df['seasonal_naive']
-        return np.clip(np.round(human_demand * 1.10), 0, None)
+        """
+        Stronger clerk heuristic than plain EWMA*1.1: blend short/long averages,
+        last-week seasonal, and recent peak, then apply aisle-specific buffers.
+        Still weaker than the LightGBM + newsvendor policy on profit.
+        """
+        ewma = df['ewma_7'].astype(float)
+        seasonal = df['seasonal_naive'].fillna(0).astype(float)
+        r7 = df['rolling_mean_7'].fillna(ewma).astype(float)
+        r28 = df['rolling_mean_28'].fillna(r7).astype(float)
+        peak = df['rolling_max_7'].fillna(r7).astype(float)
+
+        ewma = ewma.to_numpy(dtype=float)
+        seasonal = seasonal.to_numpy(dtype=float)
+        r7 = r7.to_numpy(dtype=float)
+        r28 = r28.to_numpy(dtype=float)
+        peak = peak.to_numpy(dtype=float)
+
+        demand = (
+            0.35 * ewma
+            + 0.25 * r7
+            + 0.15 * r28
+            + 0.15 * seasonal
+            + 0.10 * peak
+        )
+        # aisle buffers: produce leaner, packaged more buffered against stockouts
+        buf_map = {'FOODS_1': 1.10, 'FOODS_2': 1.28, 'FOODS_3': 1.35}
+        buf = df['dept_id'].astype(str).map(buf_map).fillna(1.18).to_numpy(dtype=float)
+        return np.clip(np.round(demand * buf), 0, None)
 
     def _dept_aware_stock(self, df):
         """
-        Perishables (FOODS_1): tighter buffer (q75) to cut spoilage.
-        Everything else: q90 upper bound is fine since waste is cheaper.
-        Never order below the point forecast.
+        Stock from the point / q75 / q90 ladder using each dept's newsvendor
+        critical fractile. Dairy is capped near q75 because spoilage there is
+        costly relative to the stronger baseline.
         """
-        dept = df['dept_id'].astype(str)
-        perishable = dept.eq('FOODS_1')
-        tight = np.maximum(df['pred_demand'], df['pred_q75'])
-        wide = np.maximum(df['pred_demand'], df['pred_q90'])
-        raw = np.where(perishable, tight, wide)
+        point = df['pred_demand'].to_numpy(dtype=float)
+        q75 = np.maximum(point, df['pred_q75'].to_numpy(dtype=float))
+        q90 = np.maximum(q75, df['pred_q90'].to_numpy(dtype=float))
+        depts = df['dept_id'].astype(str).to_numpy()
+        # hard caps keep spoilage from blowing past a competent clerk policy
+        cf_cap = {'FOODS_1': 0.75, 'FOODS_2': 0.76, 'FOODS_3': 0.82}
+
+        raw = np.empty(len(df), dtype=float)
+        for i, dept in enumerate(depts):
+            cf = min(critical_fractile(dept), cf_cap.get(dept, 0.80))
+            p, a, b = point[i], q75[i], q90[i]
+            if cf <= 0.50:
+                level = p
+            elif cf <= 0.75:
+                t = (cf - 0.50) / 0.25
+                level = p + t * (a - p)
+            else:
+                t = (cf - 0.75) / 0.15
+                level = a + t * (b - a)
+            raw[i] = level
         return np.clip(np.round(raw), 0, None)
 
     def run_simulation(self):

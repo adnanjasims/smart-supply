@@ -11,6 +11,7 @@ from grocery import (
     DEPT_COGS_RATIO,
     DEPT_SPOILAGE_RATE,
     SmartSupplyAI,
+    critical_fractile,
     parse_args,
 )
 from tests.m5_factory import write_mini_m5
@@ -127,7 +128,7 @@ class TestFeatureEngineering:
 
 
 class TestStockRules:
-    def test_dept_aware_stock(self):
+    def test_dept_aware_stock_follows_critical_fractile(self):
         app = SmartSupplyAI("a.csv", "b.csv", "c.csv")
         df = pd.DataFrame({
             "dept_id": ["FOODS_1", "FOODS_2", "FOODS_3"],
@@ -136,12 +137,29 @@ class TestStockRules:
             "pred_q90": [15.0, 15.0, 15.0],
         })
         stock = app._dept_aware_stock(df)
-        assert list(stock) == [12, 15, 15]
+        # FOODS_1 capped at q75 ladder
+        assert 10 <= stock[0] <= 12
+        # FOODS_2 near q75
+        assert 10 <= stock[1] <= 13
+        # FOODS_3 between q75 and q90
+        assert 12 <= stock[2] <= 15
 
-    def test_human_stock_buffer(self):
+    def test_critical_fractile_orders_depts_by_spoilage(self):
+        assert critical_fractile("FOODS_1") < critical_fractile("FOODS_2")
+        assert critical_fractile("FOODS_2") < critical_fractile("FOODS_3")
+
+    def test_human_stock_uses_dept_buffer(self):
         app = SmartSupplyAI("a.csv", "b.csv", "c.csv")
-        df = pd.DataFrame({"ewma_7": [10.0], "seasonal_naive": [10.0]})
-        assert app._human_stock(df)[0] == 11
+        df = pd.DataFrame({
+            "dept_id": ["FOODS_3"],
+            "ewma_7": [10.0],
+            "seasonal_naive": [10.0],
+            "rolling_mean_7": [10.0],
+            "rolling_mean_28": [10.0],
+            "rolling_max_7": [10.0],
+        })
+        # packaged buffer 1.35 on a flat 10-unit signal -> 14
+        assert app._human_stock(df)[0] == 14
 
     def test_cost_maps_cover_foods_depts(self):
         for dept in ["FOODS_1", "FOODS_2", "FOODS_3"]:
