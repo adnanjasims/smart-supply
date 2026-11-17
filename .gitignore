@@ -8,3 +8,9 @@ mlruns/
 .venv/
 .DS_Store
 .env
+*.tsbuildinfo
+PRODUCT.md
+DESIGN.md
+.impeccable/
+.agents/
+.agent/

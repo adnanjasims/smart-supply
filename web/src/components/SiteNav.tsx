@@ -1,34 +1,78 @@
-const LINKS = [
-  { id: "about", label: "About" },
-  { id: "dataset", label: "Dataset" },
-  { id: "method", label: "Method" },
-  { id: "results", label: "Results" },
-  { id: "explore", label: "Explore" },
-] as const;
+import { IconMessage } from "./Icons";
 
-export function SiteNav({ onAsk }: { onAsk: () => void }) {
-  function jump(id: string) {
-    const el = document.getElementById(id);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+export type TopView = "desk" | "pipeline";
+
+const VIEWS: { id: TopView; label: string }[] = [
+  { id: "desk", label: "Buyer Desk" },
+  { id: "pipeline", label: "Model Walkthrough" },
+];
+
+export function SiteNav({
+  activeView,
+  onSelectView,
+  onToggleChat,
+  chatOpen,
+  chatEnabled,
+}: {
+  activeView: TopView;
+  onSelectView: (view: TopView) => void;
+  onToggleChat: () => void;
+  chatOpen: boolean;
+  chatEnabled: boolean;
+}) {
+  function onTabKeyDown(e: React.KeyboardEvent<HTMLButtonElement>, idx: number) {
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      const next = e.key === "ArrowRight" ? (idx + 1) % VIEWS.length : (idx - 1 + VIEWS.length) % VIEWS.length;
+      onSelectView(VIEWS[next].id);
+    }
   }
 
   return (
-    <nav className="site-nav" aria-label="Primary">
-      <button type="button" className="nav-brand" onClick={() => jump("about")}>
-        Smart Supply
-      </button>
-      <ul className="nav-links">
-        {LINKS.map((link) => (
-          <li key={link.id}>
-            <button type="button" onClick={() => jump(link.id)}>
-              {link.label}
+    <header className="site-nav">
+      <a
+        className="brand"
+        href="#top"
+        onClick={(e) => {
+          e.preventDefault();
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }}
+      >
+        <span className="brand-mark">SmartSupply</span>
+        <span className="brand-sub">Store CA_1 Replenishment</span>
+      </a>
+
+      <nav className="nav-tabs" role="tablist" aria-label="Workspace views">
+        {VIEWS.map((view, idx) => {
+          const isSelected = activeView === view.id;
+          return (
+            <button
+              key={view.id}
+              id={`top-tab-${view.id}`}
+              type="button"
+              role="tab"
+              aria-selected={isSelected}
+              aria-controls={`top-panel-${view.id}`}
+              tabIndex={isSelected ? 0 : -1}
+              className={`nav-tab ${isSelected ? "active" : ""}`}
+              onClick={() => onSelectView(view.id)}
+              onKeyDown={(e) => onTabKeyDown(e, idx)}
+            >
+              {view.label}
             </button>
-          </li>
-        ))}
-      </ul>
-      <button type="button" className="btn btn-primary nav-ask" onClick={onAsk}>
-        Ask the data
+          );
+        })}
+      </nav>
+
+      <button
+        type="button"
+        className={`btn ${chatOpen ? "btn-secondary" : "btn-primary"}`}
+        onClick={onToggleChat}
+        title={chatEnabled ? "Open ledger Q&A assistant" : "Assistant status"}
+      >
+        <IconMessage size={15} />
+        <span>{chatOpen ? "Close Assistant" : "Ask Assistant"}</span>
       </button>
-    </nav>
+    </header>
   );
 }

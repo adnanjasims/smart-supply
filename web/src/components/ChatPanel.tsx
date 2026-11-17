@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { postChat } from "../api/client";
 import type { ChatMessage } from "../api/types";
+import { IconClose } from "./Icons";
 
 const SUGGESTIONS = [
-  "How much profit did the ML model make vs the human baseline?",
-  "Which department benefited most from ML ordering?",
-  "Show the worst stockout items.",
+  "How much profit did the ML model make vs the clerk baseline?",
+  "Which department saved the most food spoilage?",
+  "Show the top stockout SKUs in Packaged Foods.",
 ];
 
 export function ChatPanel({
@@ -25,15 +26,20 @@ export function ChatPanel({
   const [error, setError] = useState("");
   const [meta, setMeta] = useState("");
 
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   async function ask(text: string) {
     const trimmed = text.trim();
-    if (!trimmed || busy) return;
-    if (!chatEnabled) {
-      setError("Set GEMINI_API_KEY in .env on the API server, then restart uvicorn.");
-      return;
-    }
+    if (!trimmed || busy || !chatEnabled) return;
 
     const next: ChatMessage[] = [...messages, { role: "user", content: trimmed }];
     setMessages(next);
@@ -59,30 +65,36 @@ export function ChatPanel({
   }
 
   return (
-    <aside className="chat-shell" aria-label="Ask the data">
+    <aside className="chat-shell" aria-label="Ask Assistant">
       <div className="chat-head">
-        <strong>Ask the data</strong>
-        <button type="button" onClick={onClose} aria-label="Close chat">
-          close
+        <strong>Ask Assistant</strong>
+        <button type="button" onClick={onClose} aria-label="Close assistant">
+          <IconClose size={16} />
         </button>
       </div>
       <div className="chat-body">
-        <div className="filters" style={{ padding: "0.65rem 0.85rem 0", marginBottom: 0 }}>
+        <div className="chat-filters">
           <div className="field">
             <label htmlFor="chat-dept">Filter by aisle</label>
             <select id="chat-dept" value={dept} onChange={(e) => setDept(e.target.value)}>
               <option value="(all)">Whole store</option>
-              <option value="FOODS_1">Produce (fresh)</option>
-              <option value="FOODS_2">Dairy and deli</option>
-              <option value="FOODS_3">Packaged foods</option>
+              <option value="FOODS_1">Produce (FOODS_1)</option>
+              <option value="FOODS_2">Dairy &amp; Deli (FOODS_2)</option>
+              <option value="FOODS_3">Packaged Foods (FOODS_3)</option>
             </select>
           </div>
         </div>
         <div className="chat-messages">
-          {messages.length === 0 ? (
+          {!chatEnabled ? (
+            <div className="banner">
+              <strong>Assistant unavailable.</strong> Natural-language Q&amp;A is currently
+              disabled because no Gemini API key is configured on the host. All dashboard tables
+              and simulators remain active.
+            </div>
+          ) : messages.length === 0 ? (
             <p className="muted">
-              Ask about profit, stockouts, or a product id. Answers come from the holdout
-              run, not guesses. Use the aisle filter to narrow the question.
+              Ask about store profit, spoilage savings, or any SKU. Replies query the verified
+              60-day simulation ledger directly.
             </p>
           ) : null}
           {messages.map((m, i) => (
@@ -93,7 +105,7 @@ export function ChatPanel({
           {meta ? <div className="chat-meta">{meta}</div> : null}
           {error ? <div className="banner error">{error}</div> : null}
         </div>
-        {messages.length === 0 ? (
+        {chatEnabled && messages.length === 0 ? (
           <div className="suggests">
             {SUGGESTIONS.map((s) => (
               <button key={s} type="button" onClick={() => void ask(s)} disabled={busy}>
@@ -103,13 +115,17 @@ export function ChatPanel({
           </div>
         ) : null}
         <form className="chat-form" onSubmit={onSubmit}>
+          <label htmlFor="chat-input" className="sr-only">
+            Ask a store inventory question
+          </label>
           <input
+            id="chat-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="e.g. which dept had the biggest profit lift?"
-            disabled={busy}
+            placeholder={chatEnabled ? "e.g. which dept saved the most spoilage?" : "Chat disabled"}
+            disabled={busy || !chatEnabled}
           />
-          <button type="submit" disabled={busy || !input.trim()}>
+          <button type="submit" disabled={busy || !chatEnabled || !input.trim()}>
             {busy ? "..." : "Ask"}
           </button>
         </form>
