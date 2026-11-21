@@ -8,6 +8,11 @@ mlruns/
 .venv/
 .DS_Store
 .env
+.env.local
+.env.*.local
+*.pem
+.aws-sam/
+samconfig.toml
 *.tsbuildinfo
 PRODUCT.md
 DESIGN.md

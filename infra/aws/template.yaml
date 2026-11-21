@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Smart Supply AWS infrastructure (S3 model registry, DynamoDB forecast table, IAM policy)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: Deployment stage name
+
+Resources:
+  ModelArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "smartsupply-models-${EnvironmentName}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNoncurrentModelVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  ForecastsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "SmartSupplyForecasts-${EnvironmentName}"
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  RuntimePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "smartsupply-runtime-${EnvironmentName}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3ModelRegistryAccess
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt ModelArtifactsBucket.Arn
+              - !Sub "${ModelArtifactsBucket.Arn}/*"
+          - Sid: DynamoDBForecastsAccess
+            Effect: Allow
+            Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:GetItem
+            Resource:
+              - !GetAtt ForecastsTable.Arn
+
+Outputs:
+  ModelBucketName:
+    Description: Set as SMARTSUPPLY_S3_BUCKET
+    Value: !Ref ModelArtifactsBucket
+  ForecastsTableName:
+    Description: Set as SMARTSUPPLY_DDB_TABLE
+    Value: !Ref ForecastsTable
+  RuntimePolicyArn:
+    Description: Attach to IAM user or Lambda/ECS execution role
+    Value: !Ref RuntimePolicy

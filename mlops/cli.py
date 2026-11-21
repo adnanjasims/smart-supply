@@ -1,12 +1,16 @@
-"""CLI: python -m mlops <train|list|show|promote|current>"""
+"""CLI: python -m mlops <train|list|show|promote|current|sync-s3|pull-s3|publish-ddb>"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
+import pandas as pd
+
+from mlops.aws_store import DynamoDBForecastStore, S3ArtifactStore
 from mlops.pipeline import run_training_pipeline
 from mlops.registry import ModelRegistry
 from mlops.tracking import RunTracker
@@ -43,6 +47,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     current = sub.add_parser("current", help="show production pointer")
     current.add_argument("--artifacts-dir", default="artifacts")
+
+    sync_s3 = sub.add_parser("sync-s3", help="upload a registry stage to Amazon S3")
+    sync_s3.add_argument("--artifacts-dir", default="artifacts")
+    sync_s3.add_argument("--stage", default="production")
+    sync_s3.add_argument("--bucket", default="")
+
+    pull_s3 = sub.add_parser("pull-s3", help="download a registry stage from Amazon S3")
+    pull_s3.add_argument("--artifacts-dir", default="artifacts")
+    pull_s3.add_argument("--stage", default="production")
+    pull_s3.add_argument("--bucket", default="")
+
+    pub_ddb = sub.add_parser(
+        "publish-ddb", help="publish forecast CSV rows to Amazon DynamoDB"
+    )
+    pub_ddb.add_argument("--csv", default="m5_supply_chain_forecast.csv")
+    pub_ddb.add_argument("--store", default="CA_1")
+    pub_ddb.add_argument("--table", default="")
+    pub_ddb.add_argument("--max-rows", type=int, default=5000)
     return parser
 
 
@@ -127,6 +149,38 @@ def main(argv: list[str] | None = None) -> int:
             print("no production model registered")
             return 1
         print(json.dumps(info, indent=2))
+        return 0
+
+    if args.command == "sync-s3":
+        bucket = args.bucket or os.environ.get("SMARTSUPPLY_S3_BUCKET", "").strip()
+        if not bucket:
+            print("set --bucket or SMARTSUPPLY_S3_BUCKET")
+            return 1
+        reg = ModelRegistry(args.artifacts_dir, s3_store=S3ArtifactStore(bucket))
+        uploaded = reg.sync_to_s3(stage=args.stage)
+        print(json.dumps({"bucket": bucket, "uploaded": uploaded}, indent=2))
+        return 0
+
+    if args.command == "pull-s3":
+        bucket = args.bucket or os.environ.get("SMARTSUPPLY_S3_BUCKET", "").strip()
+        if not bucket:
+            print("set --bucket or SMARTSUPPLY_S3_BUCKET")
+            return 1
+        reg = ModelRegistry(args.artifacts_dir, s3_store=S3ArtifactStore(bucket))
+        saved = reg.pull_from_s3(stage=args.stage)
+        print(json.dumps({"bucket": bucket, "saved": [str(p) for p in saved]}, indent=2))
+        return 0
+
+    if args.command == "publish-ddb":
+        table = args.table or os.environ.get("SMARTSUPPLY_DDB_TABLE", "").strip()
+        if not table:
+            print("set --table or SMARTSUPPLY_DDB_TABLE")
+            return 1
+        df = pd.read_csv(args.csv)
+        written = DynamoDBForecastStore(table).publish_dataframe(
+            df, store_id=args.store, max_rows=args.max_rows
+        )
+        print(json.dumps({"table": table, "written": written}, indent=2))
         return 0
 
     parser.print_help()

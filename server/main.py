@@ -749,6 +749,68 @@ def pipeline() -> dict[str, Any]:
     }
 
 
+@app.get("/api/cloud/status")
+def cloud_status() -> dict[str, Any]:
+    """Report whether AWS S3 model registry and DynamoDB forecast store are configured."""
+    from mlops.aws_store import aws_config_summary
+
+    return aws_config_summary()
+
+
+@app.get("/api/cloud/recommendations")
+def cloud_recommendations(
+    store_id: str = Query("CA_1"),
+    dept_id: str = Query("FOODS_1"),
+    date: str | None = Query(None),
+    limit: int = Query(25, ge=1, le=200),
+) -> dict[str, Any]:
+    """Serve daily order recommendations from DynamoDB when configured, else local CSV."""
+    from mlops.aws_store import DynamoDBForecastStore, aws_config_summary
+
+    cfg = aws_config_summary()
+    if cfg["dynamodb_enabled"] and cfg["dynamodb_table"]:
+        store = DynamoDBForecastStore(cfg["dynamodb_table"])
+        items = store.query_recommendations(
+            store_id=store_id,
+            dept_id=dept_id,
+            date_prefix=date,
+            limit=limit,
+        )
+        return {
+            "source": "dynamodb",
+            "table": cfg["dynamodb_table"],
+            "count": len(items),
+            "items": items,
+        }
+
+    sim = _sim_or_503()
+    filtered = sim
+    if "dept_id" in filtered.columns:
+        filtered = filtered[filtered["dept_id"] == dept_id]
+    if date:
+        filtered = filtered[filtered["date"].astype(str).str.startswith(date)]
+    rows = []
+    for row in filtered.head(limit).itertuples(index=False):
+        rows.append(
+            {
+                "store_id": store_id,
+                "dept_id": str(getattr(row, "dept_id", dept_id)),
+                "date": str(getattr(row, "date"))[:10],
+                "item_id": str(getattr(row, "item_id")),
+                "pred_demand": round(float(getattr(row, "pred_demand", 0.0)), 3),
+                "stock_decision": round(float(getattr(row, "stock_decision", 0.0)), 3),
+                "net_profit": _money(getattr(row, "net_profit", 0.0)),
+                "waste_cost": _money(getattr(row, "waste_cost", 0.0)),
+            }
+        )
+    return {
+        "source": "local_csv",
+        "table": None,
+        "count": len(rows),
+        "items": rows,
+    }
+
+
 _DIST_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
 if _DIST_DIR.is_dir():
     app.mount("/", StaticFiles(directory=str(_DIST_DIR), html=True), name="web")
